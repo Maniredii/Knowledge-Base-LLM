@@ -2,3 +2,7 @@ node_modules
 bin/
 test-docs
 eng.traineddata
+test-output.txt
+ncert_docs/
+.llm-kb/
+tmp_diff_*

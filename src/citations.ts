@@ -50,6 +50,9 @@ export interface ParseResult {
  * - file: "lease-agreement.md", page: 12, quote: "Lease Start Date: 15 March 2019"
  * - file: "certificate.md", page: 3, quote: "Commencement Date: 15 March 2019"
  * ```
+ *
+ * @param agentResponse - The full agent response text, potentially with a CITATIONS block
+ * @returns An object with the clean answer (without CITATIONS block) and parsed citations array
  */
 export function parseCitations(agentResponse: string): ParseResult {
   if (!agentResponse || typeof agentResponse !== "string") {
@@ -351,7 +354,11 @@ function findItemsForRange(
 }
 
 /**
- * Match a single citation against bounding box data.
+ * Match a single citation against bounding box data from the sources directory.
+ *
+ * @param citation - The raw citation with file, page, and quote
+ * @param sourcesDir - Path to the sources directory containing .json bbox files
+ * @returns A MatchedCitation with confidence score and bounding box coordinates
  */
 export async function matchCitation(
   citation: RawCitation,
@@ -416,7 +423,11 @@ export async function matchCitation(
 }
 
 /**
- * Match all citations against bounding box data.
+ * Match all citations against bounding box data in parallel.
+ *
+ * @param citations - Array of raw citations to match
+ * @param sourcesDir - Path to the sources directory containing .json bbox files
+ * @returns Array of MatchedCitations with confidence and bounding box data
  */
 export async function matchAllCitations(
   citations: RawCitation[],

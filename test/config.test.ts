@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { loadConfig, ensureConfig, DEFAULT_INDEX_MODEL, DEFAULT_QUERY_MODEL } from "../src/config.js";
+import { loadConfig, ensureConfig, DEFAULT_INDEX_MODEL, DEFAULT_QUERY_MODEL, DEFAULT_OLLAMA_MODEL, DEFAULT_OLLAMA_HOST } from "../src/config.js";
 import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -91,6 +91,70 @@ describe("config", () => {
 
       const config = await ensureConfig(tempDir);
       expect(config.indexModel).toBe("my-model");
+    });
+  });
+
+  describe("ollama config", () => {
+    it("returns default ollama settings when no config exists", async () => {
+      const config = await loadConfig(tempDir);
+      expect(config.ollamaModel).toBe(DEFAULT_OLLAMA_MODEL);
+      expect(config.ollamaHost).toBe(DEFAULT_OLLAMA_HOST);
+      expect(config.provider).toBe("cloud");
+    });
+
+    it("loads ollamaModel and ollamaHost from config file", async () => {
+      const { mkdir, writeFile } = await import("node:fs/promises");
+      await mkdir(join(tempDir, ".llm-kb"), { recursive: true });
+      await writeFile(
+        join(tempDir, ".llm-kb", "config.json"),
+        JSON.stringify({ ollamaModel: "mistral", ollamaHost: "http://remote:9999" })
+      );
+
+      const config = await loadConfig(tempDir);
+      expect(config.ollamaModel).toBe("mistral");
+      expect(config.ollamaHost).toBe("http://remote:9999");
+    });
+
+    it("OLLAMA_MODEL env var overrides config file", async () => {
+      const { mkdir, writeFile } = await import("node:fs/promises");
+      await mkdir(join(tempDir, ".llm-kb"), { recursive: true });
+      await writeFile(
+        join(tempDir, ".llm-kb", "config.json"),
+        JSON.stringify({ ollamaModel: "from-file" })
+      );
+
+      process.env.OLLAMA_MODEL = "phi3";
+      try {
+        const config = await loadConfig(tempDir);
+        expect(config.ollamaModel).toBe("phi3");
+      } finally {
+        delete process.env.OLLAMA_MODEL;
+      }
+    });
+
+    it("OLLAMA_HOST env var overrides config file", async () => {
+      const { mkdir, writeFile } = await import("node:fs/promises");
+      await mkdir(join(tempDir, ".llm-kb"), { recursive: true });
+      await writeFile(
+        join(tempDir, ".llm-kb", "config.json"),
+        JSON.stringify({ ollamaHost: "http://from-file:11434" })
+      );
+
+      process.env.OLLAMA_HOST = "http://from-env:9999";
+      try {
+        const config = await loadConfig(tempDir);
+        expect(config.ollamaHost).toBe("http://from-env:9999");
+      } finally {
+        delete process.env.OLLAMA_HOST;
+      }
+    });
+
+    it("ensureConfig writes default ollama fields to config.json", async () => {
+      await ensureConfig(tempDir);
+      const raw = JSON.parse(await readFile(join(tempDir, ".llm-kb", "config.json"), "utf-8"));
+      expect(raw.ollamaModel).toBe(DEFAULT_OLLAMA_MODEL);
+      expect(raw.ollamaHost).toBe(DEFAULT_OLLAMA_HOST);
+      expect(raw.provider).toBe("cloud");
     });
   });
 });
