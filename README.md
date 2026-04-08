@@ -6,6 +6,18 @@ Inspired by [Karpathy's LLM Knowledge Bases](https://x.com/karpathy/status/20398
 
 ## Quick Start
 
+### Local mode (free, no API key)
+
+```bash
+# Install Ollama: https://ollama.com
+ollama pull llama3
+
+npm install -g llm-kb
+llm-kb run --local ./my-documents
+```
+
+### Cloud mode (Anthropic)
+
 ```bash
 npm install -g llm-kb
 llm-kb run ./my-documents
@@ -15,20 +27,28 @@ That's it. PDFs get parsed, an index is built, and an interactive chat opens —
 
 ## Authentication
 
-Two options (you need one):
+Three options (you need one):
 
-**Option 1 — Pi SDK (recommended)**
+**Option 1 — Local Ollama (free, no API key)**
+```bash
+# Install Ollama from https://ollama.com
+ollama serve          # start the server
+ollama pull llama3    # download a model
+llm-kb run --local ./docs
+```
+
+**Option 2 — Pi SDK**
 ```bash
 npm install -g @mariozechner/pi-coding-agent
 pi   # run once to authenticate
 ```
 
-**Option 2 — Anthropic API key**
+**Option 3 — Anthropic API key**
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-If neither is configured, `llm-kb` shows a clear error with setup instructions.
+If neither cloud option is configured, `llm-kb` shows a clear error with setup instructions.
 
 ## What It Does
 
@@ -267,10 +287,15 @@ Auto-generated at `.llm-kb/config.json`:
 
 ```json
 {
+  "provider": "cloud",
   "indexModel": "claude-haiku-4-5",
-  "queryModel": "claude-sonnet-4-6"
+  "queryModel": "claude-sonnet-4-6",
+  "ollamaModel": "llama3",
+  "ollamaHost": "http://localhost:11434"
 }
 ```
+
+### Cloud mode
 
 | Task | Model | Why |
 |---|---|---|
@@ -279,10 +304,28 @@ Auto-generated at `.llm-kb/config.json`:
 | Eval judge | Haiku | Checking quality — cheap, fast |
 | Query | Sonnet | Complex reasoning, citations — needs strength |
 
-Override with env vars:
+### Local mode
+
+| Task | Model | Why |
+|---|---|---|
+| Query | llama3 | Good balance of speed and quality |
+| Wiki update | llama3 | Handles knowledge synthesis well |
+
+Any Ollama model works — try `mistral`, `phi3`, `gemma2`, `llama3:70b` for more power.
+
+### Environment variable overrides
+
 ```bash
+# Cloud models
 LLM_KB_INDEX_MODEL=claude-haiku-4-5 llm-kb run ./docs
 LLM_KB_QUERY_MODEL=claude-sonnet-4-6 llm-kb query "question"
+
+# Local Ollama
+OLLAMA_MODEL=mistral llm-kb run --local ./docs
+OLLAMA_HOST=http://remote-server:11434 llm-kb run --local ./docs
+
+# Force local mode without --local flag
+LLM_KB_PROVIDER=ollama llm-kb run ./docs
 ```
 
 ## Non-PDF Files

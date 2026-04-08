@@ -1,6 +1,15 @@
 import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, basename as pathBasename } from "node:path";
+import { parseCitations } from "./citations.js";
+
+export interface TraceCitation {
+  file: string;
+  page: number;
+  quote: string;
+  matched?: boolean;
+  confidence?: number;
+}
 
 export interface KBTrace {
   sessionId: string;
@@ -14,6 +23,7 @@ export interface KBTrace {
   filesSkipped: string[];
   model?: string;
   durationMs?: number;
+  citations?: TraceCitation[];
 }
 
 /** Parse a session JSONL file and build a KBTrace. Returns null if session isn't complete yet. */
@@ -57,7 +67,8 @@ export async function buildTrace(
     ? "query"
     : "unknown";
 
-  const answer = extractText(lastAssistant.message?.content);
+  const answerText = lastAssistant.message?.content ? extractText(lastAssistant.message?.content) : "";
+  const { answer, citations } = parseCitations(answerText);
 
   const filesRead: string[] = [];
   for (const entry of messages) {
@@ -99,6 +110,7 @@ export async function buildTrace(
     filesSkipped,
     model,
     durationMs,
+    citations,
   };
 }
 

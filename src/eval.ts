@@ -5,6 +5,7 @@ import { readFile, readdir, writeFile, mkdir } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { existsSync } from "node:fs";
 import { join, basename } from "node:path";
+import { parseCitations, matchAllCitations, type MatchedCitation } from "./citations.js";
 
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -19,6 +20,7 @@ interface SessionQA {
   answer: string;
   model: string;
   durationMs: number;
+  citations: MatchedCitation[];
 }
 
 interface EvalIssue {
@@ -39,6 +41,9 @@ interface EvalMetrics {
   totalFilesRead: number;
   uniqueFilesRead: Map<string, number>; // file → read count
   wastedReads: number;    // files read but not cited in answer
+  citationsTotal: number;
+  citationsVerified: number;
+  citationsUnmatched: number;
 }
 
 export interface EvalResult {
@@ -101,6 +106,8 @@ async function parseSessionsForEval(sessionsDir: string, sourcesDir: string, lim
         if (msg.role === "user") {
           // If we had a previous Q&A, save it
           if (currentQuestion && currentAnswer) {
+            const { answer: cleanAnswer, citations: rawCitations } = parseCitations(currentAnswer);
+            const matchedCitations = await matchAllCitations(rawCitations, sourcesDir);
             qas.push({
               sessionFile: file,
               question: currentQuestion,
@@ -110,9 +117,10 @@ async function parseSessionsForEval(sessionsDir: string, sourcesDir: string, lim
               filesSkipped: filesAvailable.filter(
                 (f) => !currentFilesRead.some((r) => r.path.endsWith(f))
               ),
-              answer: currentAnswer,
+              answer: cleanAnswer,
               model: currentModel,
               durationMs: endTs - startTs,
+              citations: matchedCitations,
             });
           }
 
@@ -155,6 +163,8 @@ async function parseSessionsForEval(sessionsDir: string, sourcesDir: string, lim
 
       // Save the last Q&A
       if (currentQuestion && currentAnswer) {
+        const { answer: cleanAnswer, citations: rawCitations } = parseCitations(currentAnswer);
+        const matchedCitations = await matchAllCitations(rawCitations, sourcesDir);
         qas.push({
           sessionFile: file,
           question: currentQuestion,
@@ -164,9 +174,10 @@ async function parseSessionsForEval(sessionsDir: string, sourcesDir: string, lim
           filesSkipped: filesAvailable.filter(
             (f) => !currentFilesRead.some((r) => r.path.endsWith(f))
           ),
-          answer: currentAnswer,
+          answer: cleanAnswer,
           model: currentModel,
           durationMs: endTs - startTs,
+          citations: matchedCitations,
         });
       }
     } catch {
@@ -186,6 +197,9 @@ function calculateMetrics(qas: SessionQA[]): EvalMetrics {
   let sourceReads = 0;
   let wastedReads = 0;
   let totalDuration = 0;
+  let citationsTotal = 0;
+  let citationsVerified = 0;
+  let citationsUnmatched = 0;
 
   const uniqueSessions = new Set(qas.map((q) => q.sessionFile));
 
@@ -208,9 +222,15 @@ function calculateMetrics(qas: SessionQA[]): EvalMetrics {
       uniqueFiles.set(name, (uniqueFiles.get(name) ?? 0) + 1);
 
       // Check if this file was actually cited in the answer
-      if (!qa.answer.includes(name) && !qa.answer.includes(name.replace(".md", ""))) {
+      if (!qa.answer.includes(name) && !qa.answer.includes(name.replace(".md", "")) && !qa.citations.some((c) => c.file === name)) {
         wastedReads++;
       }
+    }
+
+    citationsTotal += qa.citations.length;
+    for (const c of qa.citations) {
+      if (!c.matched) citationsUnmatched++;
+      else if (c.confidence >= 0.8) citationsVerified++;
     }
   }
 
@@ -223,6 +243,9 @@ function calculateMetrics(qas: SessionQA[]): EvalMetrics {
     totalFilesRead,
     uniqueFilesRead: uniqueFiles,
     wastedReads,
+    citationsTotal,
+    citationsVerified,
+    citationsUnmatched,
   };
 }
 
@@ -262,6 +285,9 @@ ${filesSummary || "None — answered from wiki cache"}
 
 FILES AVAILABLE BUT SKIPPED: ${skippedList}
 
+CITATIONS PROVIDED BY AGENT:
+${qa.citations.length === 0 ? "None" : qa.citations.map((c) => `- "${c.quote}" (from ${c.file}, p.${c.page}) -> ${c.matched ? (c.confidence >= 0.8 ? "Verified match" : "Weak/Approximate match") : "Not found in source document!"}`).join("\n")}
+
 ---
 
 Check for these issues and return a JSON array of findings. Each finding has:
@@ -271,10 +297,10 @@ Check for these issues and return a JSON array of findings. Each finding has:
 - "recommendation": what to fix (one sentence)
 
 Checks:
-1. CITATION: Does the answer cite specific sources? If so, does the file content support the claims?
+1. CITATION: Does the answer cite specific sources? If so, does the file content support the claims? Are there "Not found in source document!" citations?
 2. CONTRADICTION: Does the answer say anything that contradicts the file content?
 3. WIKI-GAP: If the agent read source files (not just wiki), what topic should be added to the wiki so next time it can answer without reading files?
-4. WASTED-READ: Were any files read but not actually used in the answer?
+4. WASTED-READ: Were any files read but not actually used in the answer or citations?
 
 Return ONLY a JSON array. If no issues found, return [].
 Example: [{"type":"wiki-gap","severity":"warning","detail":"Electronic evidence topic not in wiki","recommendation":"Add electronic evidence section to wiki"}]`;
@@ -339,6 +365,16 @@ function buildReport(result: EvalResult): string {
   lines.push(`| Needed source files | ${metrics.sourceReads} |`);
   lines.push(`| Total file reads | ${metrics.totalFilesRead} |`);
   lines.push(`| Wasted reads | ${metrics.wastedReads} |`);
+  lines.push(``);
+
+  // Citations
+  lines.push(`### Citation Accuracy`);
+  lines.push(``);
+  lines.push(`| Metric | Value |`);
+  lines.push(`|---|---|`);
+  lines.push(`| Total citations | ${metrics.citationsTotal} |`);
+  lines.push(`| Verified matches | ${metrics.citationsVerified} |`);
+  lines.push(`| Unmatched (hallucinated) | ${metrics.citationsUnmatched} |`);
   lines.push(``);
 
   // Most read files
@@ -430,6 +466,9 @@ function buildAgentsInsights(result: EvalResult): string {
     if (metrics.wastedReads > 10) {
       lines.push(`- Be more selective with file reads. Last eval found ${metrics.wastedReads} wasted reads (files read but not cited).`);
     }
+    if (metrics.citationsUnmatched > 0) {
+      lines.push(`- CRITICAL: Ensure exact quotes in citations. Previous evals found ${metrics.citationsUnmatched} hallucinated or inaccurate quotes.`);
+    }
     lines.push(``);
   }
 
@@ -473,10 +512,15 @@ export async function runEval(
 
   if (qas.length === 0) {
     return {
-      metrics: { totalSessions: 0, totalQAs: 0, avgDurationMs: 0, wikiHits: 0, sourceReads: 0, totalFilesRead: 0, uniqueFilesRead: new Map(), wastedReads: 0 },
+      metrics: {
+        totalSessions: 0, totalQAs: 0, avgDurationMs: 0, wikiHits: 0, sourceReads: 0,
+        totalFilesRead: 0, uniqueFilesRead: new Map(), wastedReads: 0,
+        citationsTotal: 0, citationsVerified: 0, citationsUnmatched: 0
+      },
       issues: [],
       wikiGaps: [],
       timestamp: new Date().toISOString(),
+      agentsInsights: "",
     };
   }
 

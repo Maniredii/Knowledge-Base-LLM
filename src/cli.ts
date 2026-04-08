@@ -12,11 +12,14 @@ import { ChatDisplay } from "./tui-display.js";
 import { resolveKnowledgeBase } from "./resolve-kb.js";
 import { checkAuth, exitWithAuthError } from "./auth.js";
 import { ensureConfig, loadConfig } from "./config.js";
+import { checkOllama } from "./ollama.js";
+import { createOllamaChat, ollamaQuery } from "./ollama-query.js";
 import { existsSync } from "node:fs";
 import { readFileSync } from "node:fs";
 import { mkdir, readdir, stat } from "node:fs/promises";
 import { resolve, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createInterface } from "node:readline";
 import chalk from "chalk";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -35,11 +38,24 @@ program
   .command("run")
   .description("Scan, parse, index, and watch a folder")
   .argument("<folder>", "Path to your documents folder")
-  .action(async (folder: string) => {
-    console.log(`\n${chalk.bold("llm-kb")} v${VERSION}\n`);
+  .option("--local", "Use local Ollama instead of cloud APIs")
+  .action(async (folder: string, options: { local?: boolean }) => {
+    const useLocal = options.local || process.env.LLM_KB_PROVIDER === "ollama";
+    console.log(`\n${chalk.bold("llm-kb")} v${VERSION}${useLocal ? chalk.cyan(" (local)") : ""}\n`);
 
-    const auth = checkAuth();
+    const auth = checkAuth(useLocal);
     if (!auth.ok) exitWithAuthError();
+
+    // Check Ollama availability when using local mode
+    if (useLocal) {
+      const config = existsSync(folder) ? await loadConfig(resolve(folder)) : await ensureConfig(resolve(folder));
+      const ollamaCheck = await checkOllama({ model: config.ollamaModel, baseUrl: config.ollamaHost });
+      if (!ollamaCheck.ok) {
+        console.error(chalk.red(`  Ollama: ${ollamaCheck.error}`));
+        process.exit(1);
+      }
+      console.log(chalk.green(`  Ollama: connected`) + chalk.dim(` (${ollamaCheck.model})`));
+    }
 
     if (!existsSync(folder)) {
       console.error(chalk.red(`Error: Folder not found: ${folder}`));
@@ -48,6 +64,7 @@ program
 
     const root = resolve(folder);
     const config = await ensureConfig(root);
+    if (useLocal) config.provider = "ollama";
 
     console.log(`Scanning ${folder}...`);
 
@@ -107,7 +124,7 @@ program
 
     if (indexUpToDate) {
       console.log(chalk.dim(`\n  Index up to date.`));
-    } else {
+    } else if (!useLocal) {
       console.log(`\n  Building index... ${chalk.dim(`(${config.indexModel})`)}`);
       try {
         await buildIndex(root, sourcesDir, undefined, auth.authStorage, config.indexModel);
@@ -115,10 +132,47 @@ program
       } catch (err: any) {
         console.error(chalk.red(`  Index failed: ${err.message}`));
       }
+    } else {
+      console.log(chalk.dim(`\n  Index: skipped in local mode (sources read directly)`));
     }
 
     console.log(`\n  ${chalk.dim("Output:")} ${sourcesDir}`);
 
+    // ── Local Ollama chat ──────────────────────────────────────────────────
+    if (useLocal) {
+      const ollamaChat = await createOllamaChat(root, {
+        ollamaModel: config.ollamaModel,
+        ollamaHost: config.ollamaHost,
+      });
+
+      console.log(`\n${chalk.bold("Ready.")} Ask a question (local mode via Ollama).`);
+      console.log(chalk.dim("  Type your question and press Enter. Ctrl+C to exit.\n"));
+
+      const rl = createInterface({
+        input: process.stdin,
+        output: process.stdout,
+        prompt: chalk.cyan("> "),
+      });
+
+      rl.prompt();
+
+      rl.on("line", async (line) => {
+        const text = line.trim();
+        if (!text) { rl.prompt(); return; }
+        await ollamaChat.prompt(text);
+        console.log();
+        rl.prompt();
+      });
+
+      rl.on("close", () => {
+        ollamaChat.dispose();
+        process.exit(0);
+      });
+
+      return;
+    }
+
+    // ── Cloud TUI chat ────────────────────────────────────────────────────
     // Start watchers
     startWatcher({ folder: root, sourcesDir, authStorage: auth.authStorage, indexModel: config.indexModel });
     startSessionWatcher(root);
@@ -154,8 +208,10 @@ program
   .argument("<question>", "Your question")
   .option("--folder <path>", "Path to document folder (auto-detects if omitted)")
   .option("--save", "Save the answer to wiki/outputs/ (research mode)")
-  .action(async (question: string, options: { folder?: string; save?: boolean }) => {
-    const auth = checkAuth();
+  .option("--local", "Use local Ollama instead of cloud APIs")
+  .action(async (question: string, options: { folder?: string; save?: boolean; local?: boolean }) => {
+    const useLocal = options.local || process.env.LLM_KB_PROVIDER === "ollama";
+    const auth = checkAuth(useLocal);
     if (!auth.ok) exitWithAuthError();
 
     const root = resolveKnowledgeBase(options.folder || process.cwd());
@@ -165,12 +221,26 @@ program
     }
 
     const config = await loadConfig(root);
+
     try {
-      await query(root, question, {
-        save: options.save,
-        authStorage: auth.authStorage,
-        modelId: config.queryModel,
-      });
+      if (useLocal) {
+        const ollamaCheck = await checkOllama({ model: config.ollamaModel, baseUrl: config.ollamaHost });
+        if (!ollamaCheck.ok) {
+          console.error(chalk.red(`  Ollama: ${ollamaCheck.error}`));
+          process.exit(1);
+        }
+        await ollamaQuery(root, question, {
+          ollamaModel: config.ollamaModel,
+          ollamaHost: config.ollamaHost,
+          save: options.save,
+        });
+      } else {
+        await query(root, question, {
+          save: options.save,
+          authStorage: auth.authStorage,
+          modelId: config.queryModel,
+        });
+      }
     } catch (err: any) {
       console.error(chalk.red(err.message));
       process.exit(1);
@@ -257,7 +327,19 @@ program
     if (articleCount > 0) console.log(`  ${chalk.dim("Articles:")} ${articleCount} compiled`);
     if (outputCount > 0) console.log(`  ${chalk.dim("Outputs:")} ${outputCount} saved answer${outputCount !== 1 ? "s" : ""}`);
     console.log(`  ${chalk.dim("Models:")}  ${chalk.cyan(config.queryModel)} ${chalk.dim("(query)")}  ${chalk.cyan(config.indexModel)} ${chalk.dim("(index)")}`);
-    console.log(`  ${chalk.dim("Auth:")}    ${auth.ok ? (auth.method === "pi-sdk" ? "Pi SDK" : "ANTHROPIC_API_KEY") : chalk.red("not configured")}`);
+
+    // Ollama status
+    const ollamaCheck = await checkOllama({ model: config.ollamaModel, baseUrl: config.ollamaHost });
+    if (ollamaCheck.ok) {
+      console.log(`  ${chalk.dim("Ollama:")}  ${chalk.green("connected")} ${chalk.dim(`(${ollamaCheck.model}, ${ollamaCheck.models.length} models available)`)}`);
+    } else {
+      console.log(`  ${chalk.dim("Ollama:")}  ${chalk.dim("not running")}`);
+    }
+
+    const authLabel = auth.ok
+      ? (auth.method === "pi-sdk" ? "Pi SDK" : auth.method === "ollama" ? "Ollama (local)" : "ANTHROPIC_API_KEY")
+      : chalk.red("not configured");
+    console.log(`  ${chalk.dim("Auth:")}    ${authLabel}`);
     console.log();
   });
 

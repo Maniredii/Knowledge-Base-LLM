@@ -18,6 +18,7 @@ import { join, basename } from "node:path";
 import chalk from "chalk";
 import { getNodeModulesPath } from "./utils.js";
 import { MarkdownStream } from "./md-stream.js";
+import { parseCitations, matchAllCitations, formatCitation, citationSummary } from "./citations.js";
 import type { ChatDisplay } from "./tui-display.js";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -123,6 +124,20 @@ function buildQueryAgents(sourceFiles: string[], save: boolean, wikiContent: str
     `- For non-PDF files, extract ONLY relevant sections — never dump entire files`,
     `- Prefer primary sources over previous analyses`,
     ``,
+    `## Citation Format`,
+    ``,
+    `After your answer, include a CITATIONS block listing every source used:`,
+    ``,
+    `CITATIONS:`,
+    `- file: "lease-agreement.md", page: 12, quote: "Lease Start Date: 15 March 2019"`,
+    `- file: "certificate.md", page: 3, quote: "Commencement Date: 15 March 2019"`,
+    ``,
+    `Rules for citations:`,
+    `- The quote MUST be the EXACT text from the source, not paraphrased`,
+    `- Include the page number where you read it`,
+    `- Every factual claim in your answer must have at least one citation`,
+    `- If answering from wiki, cite the original sources listed in the wiki entry`,
+    ``,
     `## Guidelines`,
     `A guidelines file may exist at .llm-kb/guidelines.md with learned rules from`,
     `past evaluations and user preferences. Read it when:`,
@@ -191,13 +206,16 @@ function subscribeDisplay(
     const last = [...messages].reverse().find((m) => m.role === "assistant" && m.stopReason === "stop");
     if (!last) return null;
     const filesRead = extractFilesRead(messages);
+    const rawAnswer = extractAnswerText(last.content);
+    const { answer, citations } = parseCitations(rawAnswer);
     return {
       sessionId: session.sessionId, sessionFile: session.sessionFile ?? "",
       timestamp: new Date().toISOString(), mode: "query", question: lastQuestion,
-      answer: extractAnswerText(last.content), filesRead,
+      answer, filesRead,
       filesAvailable: opts.mdFiles,
       filesSkipped: opts.mdFiles.filter((f) => !filesRead.some((r) => r.endsWith(f))),
       model: last.model,
+      citations,
     };
   };
 
@@ -310,6 +328,29 @@ function subscribeDisplay(
 
     // ── Completion ───────────────────────────────────────────────────────
     if (event.type === "agent_end") {
+      // Extract answer text for citation parsing
+      const lastMsg = [...(event.messages as any[])].reverse().find((m) => m.role === "assistant" && m.stopReason === "stop");
+      const answerText = lastMsg ? extractAnswerText(lastMsg.content) : "";
+      const sourcesDir = join(opts.folder, ".llm-kb", "wiki", "sources");
+
+      // Parse and match citations
+      const { citations: rawCitations } = parseCitations(answerText);
+      if (rawCitations.length > 0) {
+        matchAllCitations(rawCitations, sourcesDir).then((matched) => {
+          if (ui) {
+            ui.showCitations(matched);
+          } else {
+            const dimFn = (s: string) => process.stdout.isTTY ? chalk.dim(s) : s;
+            process.stdout.write(dimFn("\n── Citations " + "─".repeat(Math.max(0, (process.stdout.columns || 80) - 15))) + "\n\n");
+            for (let i = 0; i < matched.length; i++) {
+              process.stdout.write(formatCitation(matched[i], i) + "\n\n");
+            }
+            const citInfo = citationSummary(matched);
+            if (citInfo) process.stdout.write(dimFn(`  ${citInfo}`) + "\n");
+          }
+        }).catch(() => { /* citation matching is non-fatal */ });
+      }
+
       if (ui) { ui.showCompletion(); ui.enableInput(); }
       else {
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);

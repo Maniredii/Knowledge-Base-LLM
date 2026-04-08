@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { AuthStorage } from "@mariozechner/pi-coding-agent";
 import chalk from "chalk";
 
-export type AuthMethod = "pi-sdk" | "api-key" | "none";
+export type AuthMethod = "pi-sdk" | "api-key" | "ollama" | "none";
 
 export interface AuthResult {
   ok: true;
@@ -24,7 +24,12 @@ export interface AuthFailure {
  * 2. ANTHROPIC_API_KEY → create in-memory storage with the key
  * 3. Neither           → return failure
  */
-export function checkAuth(): AuthResult | AuthFailure {
+export function checkAuth(forceOllama = false): AuthResult | AuthFailure {
+  // Ollama mode — no cloud auth needed
+  if (forceOllama || process.env.LLM_KB_PROVIDER === "ollama") {
+    return { ok: true, method: "ollama" };
+  }
+
   const piAuthPath = join(homedir(), ".pi", "agent", "auth.json");
 
   if (existsSync(piAuthPath)) {
@@ -47,10 +52,14 @@ export function checkAuth(): AuthResult | AuthFailure {
  */
 export function exitWithAuthError(): never {
   console.error(chalk.red("\n  No LLM authentication found.\n"));
-  console.error(`  ${chalk.bold("Option 1:")} Install Pi SDK ${chalk.dim("(recommended)")}`);
+  console.error(`  ${chalk.bold("Option 1:")} Use local Ollama ${chalk.dim("(free, no API key)")}`);
+  console.error(chalk.dim("    ollama serve"));
+  console.error(chalk.dim("    ollama pull llama3"));
+  console.error(chalk.dim("    llm-kb run --local ./docs\n"));
+  console.error(`  ${chalk.bold("Option 2:")} Install Pi SDK`);
   console.error(chalk.dim("    npm install -g @mariozechner/pi-coding-agent"));
   console.error(chalk.dim("    pi\n"));
-  console.error(`  ${chalk.bold("Option 2:")} Set your Anthropic API key`);
+  console.error(`  ${chalk.bold("Option 3:")} Set your Anthropic API key`);
   console.error(chalk.dim("    export ANTHROPIC_API_KEY=sk-ant-...\n"));
   process.exit(1);
 }

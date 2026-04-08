@@ -3,6 +3,10 @@ import {
   type MarkdownTheme, type Component, Input,
 } from "@mariozechner/pi-tui";
 import chalk from "chalk";
+import { join } from "node:path";
+import { mkdir } from "node:fs/promises";
+import { citationStatus, formatCitation, citationSummary, type MatchedCitation } from "./citations.js";
+import { renderHighlightedPage } from "./page-renderer.js";
 
 // ── Markdown theme ──────────────────────────────────────────────────────────
 
@@ -77,11 +81,12 @@ export class ChatDisplay {
   private filesReadCount = 0;
   private shownToolCalls = new Set<string>();
   private startTime = Date.now();
+  private latestCitations: MatchedCitation[] = [];
 
   onSubmit?: (text: string) => void;
   onExit?: () => void;
 
-  constructor() {
+  constructor(private readonly kbRoot: string = process.cwd()) {
     this.terminal = new ProcessTerminal();
     this.tui = new TUI(this.terminal);
 
@@ -92,10 +97,23 @@ export class ChatDisplay {
     this.inputArea.addChild(new HRule((s) => chalk.hex("#c678dd")(s)));
 
     this.input = new Input();
-    this.input.onSubmit = (text) => {
-      if (text.trim() && this.onSubmit) {
-        this.addUserMessage(text.trim());
-        this.onSubmit(text.trim());
+    this.input.onSubmit = async (text) => {
+      const trimmed = text.trim();
+      if (!trimmed) {
+        this.input.setValue("");
+        return;
+      }
+
+      // Handle TUI commands
+      if (trimmed.startsWith("/cite ")) {
+        this.input.setValue("");
+        await this.handleCiteCommand(trimmed);
+        return;
+      }
+
+      if (this.onSubmit) {
+        this.addUserMessage(trimmed);
+        this.onSubmit(trimmed);
       }
       this.input.setValue("");
     };
@@ -141,6 +159,7 @@ export class ChatDisplay {
     this.currentMd = null;
     this.currentThinking = null;
     this.hadSeparator = false;
+    this.latestCitations = [];
 
     this.currentResponse = new Container();
     this.currentResponse.addChild(new Spacer(1));
@@ -246,6 +265,55 @@ export class ChatDisplay {
     this.tui.requestRender();
   }
 
+  /** Display matched citations with verification status */
+  showCitations(citations: MatchedCitation[]): void {
+    this.latestCitations = citations;
+    if (!this.currentResponse || citations.length === 0) return;
+
+    // Citation header
+    this.currentResponse.addChild(new Spacer(1));
+    const citHeader: Component = {
+      invalidate() {},
+      render(width: number) {
+        const label = "── Citations ";
+        const pad = Math.max(0, width - label.length);
+        return [chalk.dim(label + "─".repeat(pad))];
+      },
+    };
+    this.currentResponse.addChild(citHeader);
+    this.currentResponse.addChild(new Spacer(1));
+
+    // Each citation
+    for (let i = 0; i < citations.length; i++) {
+      const c = citations[i];
+      const status = citationStatus(c);
+      const statusLabel = !c.matched
+        ? "not found in bbox data"
+        : c.confidence >= 0.8
+          ? "matched"
+          : `approximate (confidence: ${c.confidence.toFixed(2)})`;
+
+      this.currentResponse.addChild(
+        new Text(`  [${i + 1}] 📄 ${chalk.cyan(c.file)}, p.${c.page}`, 0, 0)
+      );
+      this.currentResponse.addChild(
+        new Text(chalk.dim(`      "${c.quote}"`), 0, 0)
+      );
+      this.currentResponse.addChild(
+        new Text(`      ${status} ${chalk.dim(statusLabel)}`, 0, 0)
+      );
+    }
+
+    // Summary line
+    const summary = citationSummary(citations);
+    if (summary) {
+      this.currentResponse.addChild(new Spacer(1));
+      this.currentResponse.addChild(new Text(chalk.dim(`  ${summary}`), 0, 0));
+    }
+
+    this.tui.requestRender();
+  }
+
   showCompletion(): void {
     if (!this.currentResponse) return;
     const elapsed = ((Date.now() - this.startTime) / 1000).toFixed(1);
@@ -277,5 +345,48 @@ export class ChatDisplay {
 
   disableInput(): void {
     this.tui.setFocus(null);
+  }
+
+  // ── Commands ──────────────────────────────────────────────────────────────
+
+  private async handleCiteCommand(cmd: string) {
+    const numMatch = cmd.match(/\/cite\s+(\d+)/);
+    if (!numMatch) {
+      this.addUserMessage(chalk.red("Usage: /cite <number>"));
+      return;
+    }
+    const idx = parseInt(numMatch[1], 10) - 1;
+    if (idx < 0 || idx >= this.latestCitations.length) {
+      this.addUserMessage(chalk.red(`Invalid citation number. Pick between 1 and ${this.latestCitations.length}.`));
+      return;
+    }
+
+    const citation = this.latestCitations[idx];
+    this.addUserMessage(chalk.cyan(`Opening citation [${idx + 1}] (${citation.file}, p.${citation.page})...`));
+
+    try {
+      const open = (await import("open")).default;
+      const outDir = join(this.kbRoot, ".llm-kb", "highlights");
+      await mkdir(outDir, { recursive: true });
+
+      const safeName = citation.file.replace(/\.md$/, "");
+      const outPath = join(outDir, `${safeName}-p${citation.page}.png`);
+
+      await renderHighlightedPage(
+        citation.file,
+        citation.page,
+        citation.boundingBoxes,
+        outPath
+      );
+
+      await open(outPath);
+      this.messageArea.addChild(new Spacer(1));
+      this.messageArea.addChild(new Text(chalk.dim(`  Opened ${outPath}`), 0, 0));
+      this.tui.requestRender();
+    } catch (err: any) {
+      this.messageArea.addChild(new Spacer(1));
+      this.messageArea.addChild(new Text(chalk.red(`  Error opening citation: ${err.message}`), 0, 0));
+      this.tui.requestRender();
+    }
   }
 }

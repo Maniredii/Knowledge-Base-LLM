@@ -4,15 +4,25 @@ import { join } from "node:path";
 
 export const DEFAULT_INDEX_MODEL = "claude-haiku-4-5";
 export const DEFAULT_QUERY_MODEL = "claude-sonnet-4-6";
+export const DEFAULT_OLLAMA_MODEL = "llama3";
+export const DEFAULT_OLLAMA_HOST = "http://localhost:11434";
+
+export type Provider = "cloud" | "ollama";
 
 export interface KBConfig {
+  provider: Provider;
   indexModel: string;
   queryModel: string;
+  ollamaModel: string;
+  ollamaHost: string;
 }
 
 const DEFAULTS: KBConfig = {
+  provider: "cloud",
   indexModel: DEFAULT_INDEX_MODEL,
   queryModel: DEFAULT_QUERY_MODEL,
+  ollamaModel: DEFAULT_OLLAMA_MODEL,
+  ollamaHost: DEFAULT_OLLAMA_HOST,
 };
 
 function configPath(kbRoot: string): string {
@@ -32,8 +42,11 @@ export async function loadConfig(kbRoot: string): Promise<KBConfig> {
     try {
       const raw = await readFile(path, "utf-8");
       const parsed = JSON.parse(raw);
+      if (parsed.provider) base.provider = parsed.provider;
       if (parsed.indexModel) base.indexModel = parsed.indexModel;
       if (parsed.queryModel) base.queryModel = parsed.queryModel;
+      if (parsed.ollamaModel) base.ollamaModel = parsed.ollamaModel;
+      if (parsed.ollamaHost) base.ollamaHost = parsed.ollamaHost;
     } catch {
       // Ignore malformed config — fall back to defaults
     }
@@ -41,6 +54,8 @@ export async function loadConfig(kbRoot: string): Promise<KBConfig> {
 
   if (process.env.LLM_KB_INDEX_MODEL) base.indexModel = process.env.LLM_KB_INDEX_MODEL;
   if (process.env.LLM_KB_QUERY_MODEL) base.queryModel = process.env.LLM_KB_QUERY_MODEL;
+  if (process.env.OLLAMA_MODEL) base.ollamaModel = process.env.OLLAMA_MODEL;
+  if (process.env.OLLAMA_HOST) base.ollamaHost = process.env.OLLAMA_HOST;
 
   return base;
 }
